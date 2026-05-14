@@ -6,4 +6,5 @@ retina-face
 torch
 torchvision
 pillow
-transformers
+Transformers
+tf-keras
