@@ -29,10 +29,13 @@
 # 6. Envio de datos procesados hacia el siguiente servidor  
 #-----------------------------------------------------------------------------------------
 
-from fastapi import FastAPI, UploadFile, File, Form
+#**************
+#--> LIBRERIAS
+#**************
+from fastapi import FastAPI, UploadFile, File
 import numpy as np
 import cv2
-import mediapipe as mp
+from retinaface import RetinaFace
 import torch
 import torchvision.transforms as transforms
 import torch.nn as nn
@@ -40,24 +43,20 @@ from torchvision import models
 from PIL import Image
 from transformers import pipeline
 from typing import List
-import asyncio
+
 
 app = FastAPI()
-
 @app.get("/")
 def inicio():
     return {"mensaje": "API funcionando correctamente"}
 
-semaforo = asyncio.Semaphore(5)  # menos carga = más estable
-
-# =====================
-# EMOCIONES
-# =====================
+#*********************
+# MODELO DE EMOCIONES
+#*********************
 emotion_pipe = pipeline(
     "image-classification",
     model="trpakov/vit-face-expression"
 )
-
 emociones_es = {
     "happy": "feliz",
     "sad": "triste",
@@ -68,24 +67,30 @@ emociones_es = {
     "disgust": "asco"
 }
 
-# =====================
-# MODELO EDAD / GENERO
-# =====================
+#*************************
+# MODELO DE EDAD Y GENERO
+#*************************
 model = models.resnet34(pretrained=False)
 model.fc = nn.Linear(model.fc.in_features, 18)
-model.load_state_dict(torch.load(
-    "res34_fair_align_multi_7_20190809.pt",
-    map_location="cpu"
-))
+model.load_state_dict(torch.load('res34_fair_align_multi_7_20190809.pt',map_location=torch.device('cpu')))
 model.eval()
 
+#--> CLASES
 clase_genero = ['Masculino', 'Femenino']
 
 clase_edad = [
-    '0-2','3-9','10-19','20-29','30-39',
-    '40-49','50-59','60-69','70+'
+    '0-2',
+    '3-9',
+    '10-19',
+    '20-29',
+    '30-39',
+    '40-49',
+    '50-59',
+    '60-69',
+    '70+'
 ]
 
+#--> TRANSFORMACIONES
 transform = transforms.Compose([
     transforms.Resize((224,224)),
     transforms.ToTensor(),
@@ -95,111 +100,133 @@ transform = transforms.Compose([
     )
 ])
 
-# =====================
-# MEDIAPIPE FACE DETECTION
-# =====================
-mp_face = mp.solutions.face_detection
-detector = mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+#**********************************
+#--> FUNCION PARA DETECTAR ROSTROS 
+#**********************************
+def detectar_rostros(imagen):
+    resultados = RetinaFace.detect_faces(imagen)
 
+    #--> LISTA DE ROSTROS
+    rostros_recortados = []
 
-def detectar_rostros(img):
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    results = detector.process(img_rgb)
+    # Tamano uniforme
+    TAMANO = (224, 224)
 
-    rostros = []
+    #--> RECORRER ROSTROS
+    if isinstance(resultados, dict):       # detectamos si hay rostros o no dentro de la imagen
 
-    if results.detections:
-        h, w, _ = img.shape
+        for clave in resultados:
 
-        for det in results.detections:
-            bbox = det.location_data.relative_bounding_box
+            # Obtener coordenadas
+            x1, y1, x2, y2 = resultados[clave]['facial_area']
 
-            x1 = int(bbox.xmin * w)
-            y1 = int(bbox.ymin * h)
-            x2 = int((bbox.xmin + bbox.width) * w)
-            y2 = int((bbox.ymin + bbox.height) * h)
+            # Recortar rostro
+            rostro = imagen[y1:y2, x1:x2]
 
-            x1, y1 = max(0,x1), max(0,y1)
-            x2, y2 = min(w,x2), min(h,y2)
-
-            rostro = img[y1:y2, x1:x2]
-
+            # Evitar errores
             if rostro.size == 0:
                 continue
 
-            rostro = cv2.resize(rostro, (224,224))
+            # Redimensionar
+            rostro = cv2.resize(rostro, TAMANO)
 
-            rostros.append({
+            # Guardar rostro
+            rostros_recortados.append({
                 "rostro": rostro,
-                "coords": (x1,y1,x2,y2)
+                "coords": (x1, y1, x2, y2)
             })
+    cantidad = len(rostros_recortados)
 
-    return rostros, len(rostros)
+    return rostros_recortados,cantidad
+    
+#*****************************************************
+#--> FUNCION PARA DETECTAR LA EMOCION DE CADA PERSONA
+#*****************************************************
+def detectar_emocion(rostro_bgr):
+    rostro_rgb = cv2.cvtColor(rostro_bgr, cv2.COLOR_BGR2RGB)
+    rostro_pil = Image.fromarray(rostro_rgb)
 
+    result = emotion_pipe(rostro_pil)
 
-def detectar_emocion(rostro):
-    rgb = cv2.cvtColor(rostro, cv2.COLOR_BGR2RGB)
-    pil = Image.fromarray(rgb)
+    emocion = max(result, key=lambda x: x["score"])["label"]
 
-    result = emotion_pipe(pil)
-    label = max(result, key=lambda x: x["score"])["label"]
+    return emocion
 
-    return emociones_es.get(label, label)
-
-
-def analizar_rostros(rostros):
+#********************************************************************
+#--> FUNCION PARA DETECTAR LA EDAD Y GENERO DE CADA ROSTRO DETECTADO
+#********************************************************************
+def detectar_edad_genero(rostros_recortados):
     resultados = []
+    for dato in rostros_recortados:
+        rostro = dato["rostro"]
+        emocion_en = detectar_emocion(rostro)
+        emocion = emociones_es.get(emocion_en, emocion_en)
 
-    for r in rostros:
-        rostro = r["rostro"]
+        # BGR -> RGB
+        frame_rgb = cv2.cvtColor(rostro, cv2.COLOR_BGR2RGB)
 
-        emocion = detectar_emocion(rostro)
+        # PIL
+        img = Image.fromarray(frame_rgb)
 
-        img = Image.fromarray(cv2.cvtColor(rostro, cv2.COLOR_BGR2RGB))
-        img = transform(img).unsqueeze(0)
+        # Transformar
+        img = transform(img)
+        img = img.unsqueeze(0)
 
+        # PREDICCION --> EDAD Y GENERO
         with torch.no_grad():
+
             outputs = model(img)
 
-            genero = clase_genero[torch.argmax(outputs[:,7:9]).item()]
-            edad = clase_edad[torch.argmax(outputs[:,9:18]).item()]
+            # GENERO
+            salida_genero = outputs[:, 7:9]
+            genero_predecido = torch.argmax(salida_genero, dim=1)
+            genero = clase_genero[genero_predecido.item()]
+
+            # EDAD
+            salida_edad = outputs[:, 9:18]
+            edad_predecida = torch.argmax(salida_edad, dim=1)
+            edad = clase_edad[edad_predecida.item()]
 
         resultados.append({
             "genero": genero,
             "edad": edad,
             "emocion": emocion
         })
-
     return resultados
 
-
+#************************
+#--> PROGRAMA PRINCIPAL 
+#************************
 @app.post("/analizar")
-async def analizar(
-    files: List[UploadFile] = File(...),
-    dispositivo: str = Form(...),
-    timestamp: str = Form(...)
-):
+async def analizar(files: List[UploadFile] = File(...)):
 
-    async with semaforo:
-        salida = []
+    resultados_totales = []
 
-        for file in files:
-            contents = await file.read()
-            npimg = np.frombuffer(contents, np.uint8)
-            img = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+    for file in files:
 
-            if img is None:
-                continue
+        contents = await file.read()
 
-            rostros, cantidad = detectar_rostros(img)
-            resultados = analizar_rostros(rostros)
+        npimg = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
 
-            salida.append({
+        if img is None:
+            continue
+
+        rostros_recortados, cantidad = detectar_rostros(img)
+
+        resultados = detectar_edad_genero(rostros_recortados)
+
+        if cantidad == 0:
+            resultados_totales.append({
+                "imagen": file.filename,
+                "cantidad_personas": 0,
+                "mensaje": "No se detectaron rostros",
+                "resultados": []
+            })
+        else:
+            resultados_totales.append({
                 "imagen": file.filename,
                 "cantidad_personas": cantidad,
-                "resultados": resultados,
-                "dispositivo": dispositivo,
-                "timestamp": timestamp
+                "resultados": resultados
             })
-
-        return salida
+    return resultados_totales

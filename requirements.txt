@@ -6,4 +6,4 @@ pillow
 torch
 torchvision
 transformers
-mediapipe
+tf-keras
