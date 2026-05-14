@@ -7,4 +7,5 @@ torch
 torchvision
 pillow
 Transformers
+tensorflow==2.15.0
 tf-keras
