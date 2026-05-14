@@ -7,6 +7,3 @@ torch
 torchvision
 pillow
 transformers
-tensorflow
-python-multipart
-tf-keras
