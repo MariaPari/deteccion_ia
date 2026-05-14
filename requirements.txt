@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+numpy
+opencv-python-headless
+retina-face
+torch
+torchvision
+pillow
+transformers
+tensorflow
+python-multipart
+tf-keras
