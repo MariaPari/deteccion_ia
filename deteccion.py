@@ -26,7 +26,7 @@
 #       - Rango de edad
 #       - Emocion predominante
 # 5. Generacion de respuesta en formato JSON
-# 6. Envio de datos procesados hacia el siguiente servidor
+# 6. Envio de datos procesados hacia el siguiente servidor  
 #-----------------------------------------------------------------------------------------
 
 #**************
@@ -43,7 +43,6 @@ from torchvision import models
 from PIL import Image
 from transformers import pipeline
 from typing import List
-import uvicorn
 import asyncio
 
 app = FastAPI()
@@ -238,13 +237,3 @@ async def analizar(files: List[UploadFile] = File(...),dispositivo: str = Form(.
                     "timestamp":timestamp
                 })
         return resultados_totales
-
-#*********************
-#--> INICIAR SERVIDOR
-#*********************
-if __name__ == "__main__":
-    uvicorn.run(
-        "deteccion:app",
-        host="0.0.0.0",
-        port=10000
-    )
