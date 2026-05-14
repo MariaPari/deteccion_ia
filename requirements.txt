@@ -1,11 +1,9 @@
-fastapi
-uvicorn
-numpy
-opencv-python-headless
-retina-face
+fastapi==0.110.0
+uvicorn==0.27.0
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
 torch
 torchvision
 pillow
-Transformers
-tensorflow==2.15.0
-tf-keras
+transformers
+mediapipe
