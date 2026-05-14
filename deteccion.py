@@ -29,12 +29,10 @@
 # 6. Envio de datos procesados hacia el siguiente servidor  
 #-----------------------------------------------------------------------------------------
 
-#**************
-#--> LIBRERÍAS
-#**************
 from fastapi import FastAPI, UploadFile, File, Form
 import numpy as np
 import cv2
+import mediapipe as mp
 import torch
 import torchvision.transforms as transforms
 import torch.nn as nn
@@ -43,25 +41,18 @@ from PIL import Image
 from transformers import pipeline
 from typing import List
 import asyncio
-import mediapipe as mp
 
-#*********************
-#--> FASTAPI APP
-#*********************
 app = FastAPI()
 
 @app.get("/")
 def inicio():
     return {"mensaje": "API funcionando correctamente"}
 
-#********************************
-#--> CONTROL DE CONCURRENCIA
-#********************************
-semaforo = asyncio.Semaphore(10)
+semaforo = asyncio.Semaphore(5)  # menos carga = más estable
 
-#********************************
-#--> MODELO DE EMOCIONES
-#********************************
+# =====================
+# EMOCIONES
+# =====================
 emotion_pipe = pipeline(
     "image-classification",
     model="trpakov/vit-face-expression"
@@ -77,14 +68,14 @@ emociones_es = {
     "disgust": "asco"
 }
 
-#********************************
-#--> MODELO EDAD Y GÉNERO
-#********************************
+# =====================
+# MODELO EDAD / GENERO
+# =====================
 model = models.resnet34(pretrained=False)
 model.fc = nn.Linear(model.fc.in_features, 18)
 model.load_state_dict(torch.load(
-    'res34_fair_align_multi_7_20190809.pt',
-    map_location=torch.device('cpu')
+    "res34_fair_align_multi_7_20190809.pt",
+    map_location="cpu"
 ))
 model.eval()
 
@@ -95,11 +86,8 @@ clase_edad = [
     '40-49','50-59','60-69','70+'
 ]
 
-#********************************
-#--> TRANSFORMACIONES
-#********************************
 transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize((224,224)),
     transforms.ToTensor(),
     transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
@@ -107,30 +95,23 @@ transform = transforms.Compose([
     )
 ])
 
-#********************************
-#--> MEDIAPIPE FACE DETECTION
-#********************************
+# =====================
+# MEDIAPIPE FACE DETECTION
+# =====================
 mp_face = mp.solutions.face_detection
-detector = mp_face.FaceDetection(
-    model_selection=1,
-    min_detection_confidence=0.5
-)
+detector = mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.5)
 
-#********************************
-#--> DETECCIÓN DE ROSTROS (MEDIA PIPE)
-#********************************
-def detectar_rostros(imagen):
-    rostros_recortados = []
-    TAMANO = (224, 224)
 
-    imagen_rgb = cv2.cvtColor(imagen, cv2.COLOR_BGR2RGB)
-    resultados = detector.process(imagen_rgb)
+def detectar_rostros(img):
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    results = detector.process(img_rgb)
 
-    if resultados.detections:
+    rostros = []
 
-        h, w, _ = imagen.shape
+    if results.detections:
+        h, w, _ = img.shape
 
-        for det in resultados.detections:
+        for det in results.detections:
             bbox = det.location_data.relative_bounding_box
 
             x1 = int(bbox.xmin * w)
@@ -138,67 +119,50 @@ def detectar_rostros(imagen):
             x2 = int((bbox.xmin + bbox.width) * w)
             y2 = int((bbox.ymin + bbox.height) * h)
 
-            # límites
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(w, x2), min(h, y2)
+            x1, y1 = max(0,x1), max(0,y1)
+            x2, y2 = min(w,x2), min(h,y2)
 
-            rostro = imagen[y1:y2, x1:x2]
+            rostro = img[y1:y2, x1:x2]
 
             if rostro.size == 0:
                 continue
 
-            rostro = cv2.resize(rostro, TAMANO)
+            rostro = cv2.resize(rostro, (224,224))
 
-            rostros_recortados.append({
+            rostros.append({
                 "rostro": rostro,
-                "coords": (x1, y1, x2, y2)
+                "coords": (x1,y1,x2,y2)
             })
 
-    return rostros_recortados, len(rostros_recortados)
+    return rostros, len(rostros)
 
-#********************************
-#--> EMOCIÓN
-#********************************
-def detectar_emocion(rostro_bgr):
-    rostro_rgb = cv2.cvtColor(rostro_bgr, cv2.COLOR_BGR2RGB)
-    rostro_pil = Image.fromarray(rostro_rgb)
 
-    result = emotion_pipe(rostro_pil)
+def detectar_emocion(rostro):
+    rgb = cv2.cvtColor(rostro, cv2.COLOR_BGR2RGB)
+    pil = Image.fromarray(rgb)
 
-    emocion = max(result, key=lambda x: x["score"])["label"]
+    result = emotion_pipe(pil)
+    label = max(result, key=lambda x: x["score"])["label"]
 
-    return emocion
+    return emociones_es.get(label, label)
 
-#********************************
-#--> EDAD Y GÉNERO
-#********************************
-def detectar_edad_genero(rostros_recortados):
+
+def analizar_rostros(rostros):
     resultados = []
 
-    for dato in rostros_recortados:
-        rostro = dato["rostro"]
+    for r in rostros:
+        rostro = r["rostro"]
 
-        emocion_en = detectar_emocion(rostro)
-        emocion = emociones_es.get(emocion_en, emocion_en)
+        emocion = detectar_emocion(rostro)
 
-        frame_rgb = cv2.cvtColor(rostro, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(frame_rgb)
-
-        img = transform(img)
-        img = img.unsqueeze(0)
+        img = Image.fromarray(cv2.cvtColor(rostro, cv2.COLOR_BGR2RGB))
+        img = transform(img).unsqueeze(0)
 
         with torch.no_grad():
             outputs = model(img)
 
-            # GÉNERO
-            salida_genero = outputs[:, 7:9]
-            genero_idx = torch.argmax(salida_genero, dim=1).item()
-            genero = clase_genero[genero_idx]
-
-            # EDAD
-            salida_edad = outputs[:, 9:18]
-            edad_idx = torch.argmax(salida_edad, dim=1).item()
-            edad = clase_edad[edad_idx]
+            genero = clase_genero[torch.argmax(outputs[:,7:9]).item()]
+            edad = clase_edad[torch.argmax(outputs[:,9:18]).item()]
 
         resultados.append({
             "genero": genero,
@@ -208,9 +172,7 @@ def detectar_edad_genero(rostros_recortados):
 
     return resultados
 
-#********************************
-#--> ENDPOINT PRINCIPAL
-#********************************
+
 @app.post("/analizar")
 async def analizar(
     files: List[UploadFile] = File(...),
@@ -219,10 +181,9 @@ async def analizar(
 ):
 
     async with semaforo:
-        resultados_totales = []
+        salida = []
 
         for file in files:
-
             contents = await file.read()
             npimg = np.frombuffer(contents, np.uint8)
             img = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
@@ -230,40 +191,15 @@ async def analizar(
             if img is None:
                 continue
 
-            rostros_recortados, cantidad = detectar_rostros(img)
-            resultados = detectar_edad_genero(rostros_recortados)
+            rostros, cantidad = detectar_rostros(img)
+            resultados = analizar_rostros(rostros)
 
-            if cantidad == 0:
-                resultados_totales.append({
-                    "imagen": file.filename,
-                    "cantidad_personas": 0,
-                    "mensaje": "No se detectaron rostros",
-                    "resultados": [],
-                    "dispositivo": dispositivo,
-                    "timestamp": timestamp
-                })
-            else:
-                resultados_totales.append({
-                    "imagen": file.filename,
-                    "cantidad_personas": cantidad,
-                    "resultados": resultados,
-                    "dispositivo": dispositivo,
-                    "timestamp": timestamp
-                })
+            salida.append({
+                "imagen": file.filename,
+                "cantidad_personas": cantidad,
+                "resultados": resultados,
+                "dispositivo": dispositivo,
+                "timestamp": timestamp
+            })
 
-        return resultados_totales
-
-#********************************
-#--> START SERVER (RENDER FIX)
-#********************************
-if __name__ == "__main__":
-    import os
-    import uvicorn
-
-    port = int(os.environ.get("PORT", 10000))
-
-    uvicorn.run(
-        "deteccion:app",
-        host="0.0.0.0",
-        port=port
-    )
+        return salida
