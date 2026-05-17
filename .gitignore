@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+
+# entorno virtual
+venv/
+.env
+
+# modelos IA
+*.onnx
+*.onnx.data

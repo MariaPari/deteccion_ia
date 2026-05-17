@@ -32,20 +32,14 @@
 #**************
 #--> LIBRERIAS
 #**************
-import os
-os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
-os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 from fastapi import FastAPI, UploadFile, File
 import numpy as np
 import cv2
-from insightface.app import FaceAnalysis
-import torch
-import torchvision.transforms as transforms
-import torch.nn as nn
-from torchvision import models
-from PIL import Image
-from transformers import pipeline
+from insightface.model_zoo import get_model
 from typing import List 
+import onnxruntime as ort
+import os
+import urllib.request
 
 app = FastAPI()
 @app.get("/")
@@ -53,47 +47,99 @@ def inicio():
     return {"mensaje": "API funcionando correctamente."}
 
 detector_rostros = None
-emotion_pipe = None
-model = None
+emotion_session = None
+age_gender_session = None
+emotion_input_name = None
+age_gender_input_name = None
+
 @app.on_event("startup")
 async def cargar_modelos():
 
     global detector_rostros
-    global emotion_pipe
-    global model
+    global emotion_session
+    global age_gender_session
+    global emotion_input_name
+    global age_gender_input_name
+
+    opciones = ort.SessionOptions()
+    opciones.intra_op_num_threads = 1
+    opciones.inter_op_num_threads = 1
 
     # SCRFD
-    detector_rostros = FaceAnalysis(
-        allowed_modules=['detection'],
+    detector_rostros = get_model(
+        "scrfd_2.5g_bnkps.onnx",
         providers=['CPUExecutionProvider']
     )
 
     detector_rostros.prepare(
         ctx_id=0,
-        det_size=(320, 320)
+        input_size=(416,416)
     )
 
-    # EMOCIONES
-    emotion_pipe = pipeline(
-        "image-classification",
-        model="trpakov/vit-face-expression",
-        device=-1
+    # EMOCIONES ONNX
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+    emotion_dir = os.path.join(
+        BASE_DIR,
+        "emotion_onnx"
     )
 
-    # EDAD Y GENERO
-    model = models.resnet34(pretrained=False)
-    model.fc = nn.Linear(model.fc.in_features, 18)
+    os.makedirs(
+        emotion_dir,
+        exist_ok=True
+    )
 
-    model.load_state_dict(
-        torch.load(
-            'res34_fair_align_multi_7_20190809.pt',
-            map_location=torch.device('cpu')
+    emotion_model_path = os.path.join(
+        emotion_dir,
+        "model.onnx"
+    )
+
+    # DESCARGAR MODELO SI NO EXISTE
+    if not os.path.exists(emotion_model_path):
+
+        print("Descargando modelo de emociones...")
+
+        urllib.request.urlretrieve(
+            "https://huggingface.co/stephaniePP/emotion-model/resolve/main/model.onnx",
+            emotion_model_path
         )
+
+        print("Modelo descargado")
+
+    emotion_session = ort.InferenceSession(
+        emotion_model_path,
+        sess_options=opciones,
+        providers=["CPUExecutionProvider"]
     )
 
-    model.eval()
+    # EDAD Y GENERO ONNX
+    age_gender_model_path = os.path.join(
+        BASE_DIR,
+        "age_gender_single.onnx"
+    )
 
-    print("MODELOS CARGADOS")
+    # DESCARGAR SI NO EXISTE
+    if not os.path.exists(age_gender_model_path):
+
+        print("Descargando modelo edad/genero...")
+
+        urllib.request.urlretrieve(
+            "https://drive.google.com/uc?id=13bZAey4vWefYmNFWC8hD5F7cqSYFe3bK",
+            age_gender_model_path
+        )
+
+        print("Modelo edad/genero descargado")
+
+    age_gender_session = ort.InferenceSession(
+        age_gender_model_path,
+        sess_options=opciones,
+        providers=["CPUExecutionProvider"]
+    )
+
+    emotion_input_name = emotion_session.get_inputs()[0].name
+
+    age_gender_input_name = age_gender_session.get_inputs()[0].name
+    print("MODELOS ONNX CARGADOS")
 
 emociones_es = {
     "happy": "feliz",
@@ -120,67 +166,133 @@ clase_edad = [
     '70+'
 ]
 
-#--> TRANSFORMACIONES
-transform = transforms.Compose([
-    transforms.Resize((224,224)),
-    transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
+def preprocess_image(img_bgr):
+
+    img_rgb = cv2.cvtColor(
+        img_bgr,
+        cv2.COLOR_BGR2RGB
     )
-])
+
+    img = cv2.resize(
+        img_rgb,
+        (224,224)
+    )
+
+    img = img.astype(np.float32) / 255.0
+
+    mean = np.array(
+        [0.485,0.456,0.406],
+        dtype=np.float32
+    )
+
+    std = np.array(
+        [0.229,0.224,0.225],
+        dtype=np.float32
+    )
+
+    img = (img - mean) / std
+
+    img = np.transpose(
+        img,
+        (2,0,1)
+    )
+
+    img = np.expand_dims(
+        img,
+        axis=0
+    )
+
+    return img
 
 #**********************************
 #--> FUNCION PARA DETECTAR ROSTROS 
 #**********************************
 def detectar_rostros(imagen):
 
-    rostros = detector_rostros.get(imagen)
+    bboxes, kpss = detector_rostros.detect(
+        imagen,
+        max_num=0
+    )
 
     #--> LISTA DE ROSTROS
     rostros_recortados = []
 
-    # Tamano uniforme
+    # Tamaño uniforme
     TAMANO = (224, 224)
 
+    if bboxes is None:
+        return [], 0
+    
     #--> RECORRER ROSTROS
-    for rostro in rostros:       # detectamos si hay rostros o no dentro de la imagen
+    for bbox in bboxes:
 
-            # Obtener coordenadas
-            x1, y1, x2, y2 = map(int, rostro.bbox)
-            if x1 < 0 or y1 < 0 or x2 > imagen.shape[1] or y2 > imagen.shape[0]:
-                continue
+        x1, y1, x2, y2 = bbox[:4].astype(int)
+        score = bbox[4]
 
-            # Recortar rostro
-            rostro = imagen[y1:y2, x1:x2]
+        # Filtrar detecciones débiles
+        if score < 0.5:
+            continue
 
-            # Evitar errores
-            if rostro.size == 0:
-                continue
+        # Verificar límites
+        if x1 < 0 or y1 < 0 or x2 > imagen.shape[1] or y2 > imagen.shape[0]:
+            continue
 
-            # Redimensionar
-            rostro = cv2.resize(rostro, TAMANO)
+        # Recortar rostro
+        rostro = imagen[y1:y2, x1:x2]
 
-            # Guardar rostro
-            rostros_recortados.append({
-                "rostro": rostro,
-                "coords": (x1, y1, x2, y2)
-            })
+        # Evitar errores
+        if rostro.size == 0:
+            continue
+
+        # Redimensionar
+        rostro = cv2.resize(rostro, TAMANO)
+
+        # Guardar rostro
+        rostros_recortados.append({
+            "rostro": rostro,
+            "coords": (x1, y1, x2, y2)
+        })
+
     cantidad = len(rostros_recortados)
 
-    return rostros_recortados,cantidad
+    return rostros_recortados, cantidad
     
 #*****************************************************
 #--> FUNCION PARA DETECTAR LA EMOCION DE CADA PERSONA
 #*****************************************************
 def detectar_emocion(rostro_bgr):
+
     try:
-        rostro_rgb = cv2.cvtColor(rostro_bgr,cv2.COLOR_BGR2RGB)
-        rostro_pil = Image.fromarray(rostro_rgb)
 
-        result = emotion_pipe(rostro_pil)
+        rostro = preprocess_image(rostro_bgr)
 
-        emocion = max(result,key=lambda x: x["score"])["label"]
+        input_name = emotion_input_name
+
+        outputs = emotion_session.run(
+            None,
+            {
+                input_name: rostro
+            }
+        )
+
+        logits = outputs[0]
+
+        predicted_class = np.argmax(
+            logits,
+            axis=-1
+        )[0]
+
+        labels = [
+            "angry",
+            "disgust",
+            "fear",
+            "happy",
+            "neutral",
+            "sad",
+            "surprise"
+        ]
+
+        emocion = labels[predicted_class]
 
         return emocion
 
@@ -197,30 +309,27 @@ def detectar_edad_genero(rostros_recortados):
         emocion_en = detectar_emocion(rostro)
         emocion = emociones_es.get(emocion_en, emocion_en)
 
-        # BGR -> RGB
-        frame_rgb = cv2.cvtColor(rostro, cv2.COLOR_BGR2RGB)
-
-        # PIL
-        img = Image.fromarray(frame_rgb)
-
-        # Transformar
-        img = transform(img)
-        img = img.unsqueeze(0)
+        img = preprocess_image(rostro)
 
         # PREDICCION --> EDAD Y GENERO
-        with torch.no_grad():
+        input_name = age_gender_input_name
 
-            outputs = model(img)
+        outputs = age_gender_session.run(
+            None,
+            {
+                input_name: img
+            }
+        )[0]
 
-            # GENERO
-            salida_genero = outputs[:, 7:9]
-            genero_predecido = torch.argmax(salida_genero, dim=1)
-            genero = clase_genero[genero_predecido.item()]
+        # GENERO
+        salida_genero = outputs[:, 7:9]
+        genero_predecido = np.argmax(salida_genero, axis=1)
+        genero = clase_genero[genero_predecido.item()]
 
-            # EDAD
-            salida_edad = outputs[:, 9:18]
-            edad_predecida = torch.argmax(salida_edad, dim=1)
-            edad = clase_edad[edad_predecida.item()]
+        # EDAD
+        salida_edad = outputs[:, 9:18]
+        edad_predecida = np.argmax(salida_edad, axis=1)
+        edad = clase_edad[edad_predecida.item()]
 
         resultados.append({
             "genero": genero,
