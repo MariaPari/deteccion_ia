@@ -1,9 +1,9 @@
 fastapi
 uvicorn
 numpy
-opencv-python-headless
-pillow
+opencv-python
+insightface
 torch
 torchvision
+pillow
 transformers
-tf-keras

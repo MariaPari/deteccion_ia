@@ -35,27 +35,40 @@
 from fastapi import FastAPI, UploadFile, File
 import numpy as np
 import cv2
-from retinaface import RetinaFace
+from insightface.app import FaceAnalysis
 import torch
 import torchvision.transforms as transforms
 import torch.nn as nn
 from torchvision import models
 from PIL import Image
 from transformers import pipeline
-from typing import List
-
+from typing import List 
 
 app = FastAPI()
 @app.get("/")
 def inicio():
-    return {"mensaje": "API funcionando correctamente"}
+    return {"mensaje": "API funcionando correctamente."}
 
-#*********************
-# MODELO DE EMOCIONES
-#*********************
+#****************************************
+# MODELO PARA DETECTAR ROSTROS --> SCRFD
+#****************************************
+detector_rostros = FaceAnalysis(
+    allowed_modules=['detection'],
+    providers=['CPUExecutionProvider']
+)
+
+detector_rostros.prepare(
+    ctx_id=0,
+    det_size=(320, 320)
+)
+
+#*********************************************
+# MODELO DE EMOCIONES --> ViT Face Expression
+#*********************************************
 emotion_pipe = pipeline(
     "image-classification",
-    model="trpakov/vit-face-expression"
+    model="trpakov/vit-face-expression",
+    device=-1
 )
 emociones_es = {
     "happy": "feliz",
@@ -67,9 +80,9 @@ emociones_es = {
     "disgust": "asco"
 }
 
-#*************************
-# MODELO DE EDAD Y GENERO
-#*************************
+#**************************************
+# MODELO DE EDAD Y GENERO --> ResNet34
+#**************************************
 model = models.resnet34(pretrained=False)
 model.fc = nn.Linear(model.fc.in_features, 18)
 model.load_state_dict(torch.load('res34_fair_align_multi_7_20190809.pt',map_location=torch.device('cpu')))
@@ -104,7 +117,8 @@ transform = transforms.Compose([
 #--> FUNCION PARA DETECTAR ROSTROS 
 #**********************************
 def detectar_rostros(imagen):
-    resultados = RetinaFace.detect_faces(imagen)
+
+    rostros = detector_rostros.get(imagen)
 
     #--> LISTA DE ROSTROS
     rostros_recortados = []
@@ -113,12 +127,12 @@ def detectar_rostros(imagen):
     TAMANO = (224, 224)
 
     #--> RECORRER ROSTROS
-    if isinstance(resultados, dict):       # detectamos si hay rostros o no dentro de la imagen
-
-        for clave in resultados:
+    for rostro in rostros:       # detectamos si hay rostros o no dentro de la imagen
 
             # Obtener coordenadas
-            x1, y1, x2, y2 = resultados[clave]['facial_area']
+            x1, y1, x2, y2 = map(int, rostro.bbox)
+            if x1 < 0 or y1 < 0 or x2 > imagen.shape[1] or y2 > imagen.shape[0]:
+                continue
 
             # Recortar rostro
             rostro = imagen[y1:y2, x1:x2]
@@ -143,14 +157,18 @@ def detectar_rostros(imagen):
 #--> FUNCION PARA DETECTAR LA EMOCION DE CADA PERSONA
 #*****************************************************
 def detectar_emocion(rostro_bgr):
-    rostro_rgb = cv2.cvtColor(rostro_bgr, cv2.COLOR_BGR2RGB)
-    rostro_pil = Image.fromarray(rostro_rgb)
+    try:
+        rostro_rgb = cv2.cvtColor(rostro_bgr,cv2.COLOR_BGR2RGB)
+        rostro_pil = Image.fromarray(rostro_rgb)
 
-    result = emotion_pipe(rostro_pil)
+        result = emotion_pipe(rostro_pil)
 
-    emocion = max(result, key=lambda x: x["score"])["label"]
+        emocion = max(result,key=lambda x: x["score"])["label"]
 
-    return emocion
+        return emocion
+
+    except:
+        return "neutral"
 
 #********************************************************************
 #--> FUNCION PARA DETECTAR LA EDAD Y GENERO DE CADA ROSTRO DETECTADO
@@ -211,6 +229,16 @@ async def analizar(files: List[UploadFile] = File(...)):
 
         if img is None:
             continue
+
+        MAX_SIZE = 1280
+        h, w = img.shape[:2]
+        if max(h, w) > MAX_SIZE:
+            scale = MAX_SIZE / max(h, w)
+
+            img = cv2.resize(
+                img,
+                (int(w * scale), int(h * scale))
+            )
 
         rostros_recortados, cantidad = detectar_rostros(img)
 
