@@ -32,6 +32,9 @@
 #**************
 #--> LIBRERIAS
 #**************
+import os
+os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 from fastapi import FastAPI, UploadFile, File
 import numpy as np
 import cv2
@@ -49,27 +52,49 @@ app = FastAPI()
 def inicio():
     return {"mensaje": "API funcionando correctamente."}
 
-#****************************************
-# MODELO PARA DETECTAR ROSTROS --> SCRFD
-#****************************************
-detector_rostros = FaceAnalysis(
-    allowed_modules=['detection'],
-    providers=['CPUExecutionProvider']
-)
+detector_rostros = None
+emotion_pipe = None
+model = None
+@app.on_event("startup")
+async def cargar_modelos():
 
-detector_rostros.prepare(
-    ctx_id=0,
-    det_size=(320, 320)
-)
+    global detector_rostros
+    global emotion_pipe
+    global model
 
-#*********************************************
-# MODELO DE EMOCIONES --> ViT Face Expression
-#*********************************************
-emotion_pipe = pipeline(
-    "image-classification",
-    model="trpakov/vit-face-expression",
-    device=-1
-)
+    # SCRFD
+    detector_rostros = FaceAnalysis(
+        allowed_modules=['detection'],
+        providers=['CPUExecutionProvider']
+    )
+
+    detector_rostros.prepare(
+        ctx_id=0,
+        det_size=(320, 320)
+    )
+
+    # EMOCIONES
+    emotion_pipe = pipeline(
+        "image-classification",
+        model="trpakov/vit-face-expression",
+        device=-1
+    )
+
+    # EDAD Y GENERO
+    model = models.resnet34(pretrained=False)
+    model.fc = nn.Linear(model.fc.in_features, 18)
+
+    model.load_state_dict(
+        torch.load(
+            'res34_fair_align_multi_7_20190809.pt',
+            map_location=torch.device('cpu')
+        )
+    )
+
+    model.eval()
+
+    print("MODELOS CARGADOS")
+
 emociones_es = {
     "happy": "feliz",
     "sad": "triste",
@@ -79,14 +104,6 @@ emociones_es = {
     "surprise": "sorpresa",
     "disgust": "asco"
 }
-
-#**************************************
-# MODELO DE EDAD Y GENERO --> ResNet34
-#**************************************
-model = models.resnet34(pretrained=False)
-model.fc = nn.Linear(model.fc.in_features, 18)
-model.load_state_dict(torch.load('res34_fair_align_multi_7_20190809.pt',map_location=torch.device('cpu')))
-model.eval()
 
 #--> CLASES
 clase_genero = ['Masculino', 'Femenino']

@@ -1,10 +1,11 @@
 fastapi
 uvicorn
 numpy
-opencv-python
+opencv-python-headless
 insightface
 onnxruntime
 torch
 torchvision
 pillow
 transformers
+python-multipart
