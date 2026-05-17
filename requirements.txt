@@ -3,6 +3,7 @@ uvicorn
 numpy
 opencv-python
 insightface
+onnxruntime
 torch
 torchvision
 pillow
